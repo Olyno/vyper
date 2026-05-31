@@ -134,14 +134,18 @@ def _analyze_module_bodies(module_ast: vy_ast.Module) -> None:
     module_t = module_ast._metadata["type"]
     namespace = module_ast._metadata["namespace"]
 
+    err_list = ExceptionList()
+
     with override_global_namespace(namespace):
-        analyze_functions(module_ast)
-        _validate_exports_uses(module_ast, module_t)
-        _validate_initialized_modules(module_ast, module_t)
-        _validate_used_modules(module_ast, module_t)
+        err_list.extend(analyze_functions(module_ast))
+        err_list.extend(_validate_exports_uses(module_ast, module_t))
+        err_list.extend(_validate_initialized_modules(module_ast, module_t))
+        err_list.extend(_validate_used_modules(module_ast, module_t))
+
+    err_list.raise_if_not_empty()
 
 
-def _validate_used_modules(module_ast: vy_ast.Module, module_t: ModuleT) -> None:
+def _validate_used_modules(module_ast: vy_ast.Module, module_t: ModuleT) -> ExceptionList:
     """Check all `uses:` modules are actually used."""
     should_use = {}
 
@@ -170,18 +174,18 @@ def _validate_used_modules(module_ast: vy_ast.Module, module_t: ModuleT) -> None
         if used_module in should_use:
             del should_use[used_module]
 
+    err_list = ExceptionList()
     if len(should_use) > 0:
-        err_list = ExceptionList()
         for used_module_info, uses_info in should_use.values():
             msg = f"`{used_module_info.alias}` is declared as used, but "
             msg += f"its state is not actually used in {module_t}!"
             hint = f"delete `uses: {used_module_info.alias}`"
             err_list.append(BorrowException(msg, uses_info.node, hint=hint))
 
-        err_list.raise_if_not_empty()
+    return err_list
 
 
-def _validate_initialized_modules(module_ast: vy_ast.Module, module_t: ModuleT) -> None:
+def _validate_initialized_modules(module_ast: vy_ast.Module, module_t: ModuleT) -> ExceptionList:
     """Check all `initializes:` modules have `__init__()` called exactly once."""
     # only call `__init__()` for modules which have an
     # `__init__()` function
@@ -198,6 +202,7 @@ def _validate_initialized_modules(module_ast: vy_ast.Module, module_t: ModuleT) 
     if constructor is not None:
         init_calls = constructor.ast_def.get_descendants(vy_ast.Call)  # type: ignore
 
+    err_list = ExceptionList()
     seen_initializers: dict[ModuleT, vy_ast.VyperNode] = {}
     for call_node in init_calls:
         expr_info = call_node.func._expr_info
@@ -221,20 +226,21 @@ def _validate_initialized_modules(module_ast: vy_ast.Module, module_t: ModuleT) 
             seen_location = seen_initializers[initialized_module.module_t]
             msg = f"tried to initialize `{initialized_module.alias}`, "
             msg += "but its __init__() function was already called!"
-            raise InitializerException(msg, call_node.func, seen_location)
+            err_list.append(InitializerException(msg, call_node.func, seen_location))
+            continue
 
         if initialized_module.module_t not in should_initialize:
             msg = f"tried to initialize `{initialized_module.alias}`, "
             msg += "but it is not in initializer list!"
             hint = f"add `initializes: {initialized_module.alias}` "
             hint += "as a top-level statement to your contract"
-            raise InitializerException(msg, call_node.func, hint=hint)
+            err_list.append(InitializerException(msg, call_node.func, hint=hint))
+            continue
 
         del should_initialize[initialized_module.module_t]
         seen_initializers[initialized_module.module_t] = call_node.func
 
     if len(should_initialize) > 0:
-        err_list = ExceptionList()
         for s in should_initialize.values():
             msg = "not initialized!"
             hint = f"add `{s.module_info.alias}.__init__()` to "
@@ -247,10 +253,10 @@ def _validate_initialized_modules(module_ast: vy_ast.Module, module_t: ModuleT) 
                 init_func_node = constructor.decl_node
             err_list.append(InitializerException(msg, init_func_node, s.node, hint=hint))
 
-        err_list.raise_if_not_empty()
+    return err_list
 
 
-def _validate_exports_uses(module_ast: vy_ast.Module, module_t: ModuleT) -> None:
+def _validate_exports_uses(module_ast: vy_ast.Module, module_t: ModuleT) -> ExceptionList:
     """
     Check that exported functions that use state have proper `uses:` declarations.
 
@@ -272,6 +278,8 @@ def _validate_exports_uses(module_ast: vy_ast.Module, module_t: ModuleT) -> None
                     assert module_info is not None
 
                     info.used_modules.add(module_info)
+
+    return ExceptionList()
 
 
 def _build_call_graph_edges(module_ast: vy_ast.Module):

@@ -72,7 +72,7 @@ from vyper.semantics.types.function import (
 from vyper.semantics.types.utils import type_from_annotation
 
 
-def analyze_functions(vy_module: vy_ast.Module) -> None:
+def analyze_functions(vy_module: vy_ast.Module) -> ExceptionList:
     """Analyzes a vyper ast and validates the function bodies"""
     err_list = ExceptionList()
 
@@ -84,7 +84,7 @@ def analyze_functions(vy_module: vy_ast.Module) -> None:
             continue
         _analyze_function_r(node._expanded_getter, err_list)
 
-    err_list.raise_if_not_empty()
+    return err_list
 
 
 def _analyze_function_r(node: vy_ast.FunctionDef, err_list: ExceptionList):
