@@ -101,7 +101,9 @@ def _analyze_function_r(node: vy_ast.FunctionDef, err_list: ExceptionList):
         with override_global_namespace(namespace):
             with namespace.enter_scope():
                 analyzer = FunctionAnalyzer(node, namespace)
-                analyzer.analyze()
+                inner_errors = analyzer.analyze()
+                if inner_errors:
+                    err_list.extend(inner_errors)
     except VyperException as e:
         err_list.append(e)
 
@@ -394,7 +396,7 @@ class FunctionAnalyzer(VyperNodeVisitorBase):
 
     def analyze(self):
         if self.func.analysed:
-            return
+            return ExceptionList()
 
         # mark seen before analysing, if analysis throws an exception which
         # gets caught, we don't want to analyse again.
@@ -410,6 +412,8 @@ class FunctionAnalyzer(VyperNodeVisitorBase):
             self.namespace[arg.name] = VarInfo(
                 arg.typ, location=location, modifiability=modifiability, decl_node=arg.ast_source
             )
+
+        err_list = ExceptionList()
 
         if self.func.is_abstract:
             if not is_ellipsis_body(self.fn_node.body):
@@ -427,15 +431,20 @@ class FunctionAnalyzer(VyperNodeVisitorBase):
             # Concrete method
 
             for node in self.fn_node.body:
-                self.visit(node)
+                try:
+                    self.visit(node)
+                except VyperException as e:
+                    err_list.append(e)
 
-            # also called for side effect (checking unreachable code)
-            _is_terminated = is_terminated(self.fn_node.body)
+            # Check unreachable code (skip if we already have errors,
+            # as the CFG may be unreliable)
+            if not err_list:
+                _is_terminated = is_terminated(self.fn_node.body)
 
-            if self.func.return_type and not _is_terminated:
-                raise FunctionDeclarationException(
-                    f"Missing return statement in function '{self.fn_node.name}'", self.fn_node
-                )
+                if self.func.return_type and not _is_terminated:
+                    raise FunctionDeclarationException(
+                        f"Missing return statement in function '{self.fn_node.name}'", self.fn_node
+                    )
 
         # visit default args
         assert self.func.n_keyword_args == len(self.fn_node.args.defaults)
@@ -447,7 +456,12 @@ class FunctionAnalyzer(VyperNodeVisitorBase):
             )
 
             if not skip_validation:
-                self.expr_visitor.visit(kwarg.default_value, kwarg.typ)
+                try:
+                    self.expr_visitor.visit(kwarg.default_value, kwarg.typ)
+                except VyperException as e:
+                    err_list.append(e)
+
+        return err_list
 
     @contextlib.contextmanager
     def enter_for_loop(self, varaccess: Optional[VarAccess]):
